@@ -4,6 +4,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher, Router, types
+from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
 from dotenv import load_dotenv
@@ -127,7 +128,7 @@ def format_weather_message(data):
         return "❌ Ошибка при обработке данных о погоде."
 
 
-@router.message(commands=["start"])
+@router.message(Command("start"))
 async def start_command(message: types.Message) -> None:
     """Обработчик команды /start - показывает погоду в заданном городе"""
     user = message.from_user
@@ -144,7 +145,7 @@ async def start_command(message: types.Message) -> None:
     await message.answer(welcome_text + weather_message, parse_mode="Markdown")
 
 
-@router.message(commands=["help"])
+@router.message(Command("help"))
 async def help_command(message: types.Message) -> None:
     """Обработчик команды /help - показывает справку"""
     help_text = (
@@ -158,7 +159,7 @@ async def help_command(message: types.Message) -> None:
     await message.answer(help_text, parse_mode="Markdown")
 
 
-@router.message(commands=["weather"])
+@router.message(Command("weather"))
 async def weather_command(message: types.Message) -> None:
     """Дополнительная команда для быстрого доступа к погоде"""
     weather_data = get_weather_data(DEFAULT_CITY)
@@ -186,7 +187,6 @@ async def aiohttp_app():
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
-        secret_token=TELEGRAM_TOKEN,
     )
 
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
