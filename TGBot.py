@@ -1,8 +1,10 @@
 from datetime import datetime
 import logging
 import os
+import threading
 
 from dotenv import load_dotenv
+from flask import Flask, jsonify
 import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -19,7 +21,7 @@ load_dotenv()
 
 # Читаем ключи из переменных окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-API_KEY = os.getenv("API_KEY")  # Исправлено: убрал хардкодный ключ
+API_KEY = os.getenv("API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("Не найден TELEGRAM_TOKEN в переменных окружения (.env)")
@@ -28,6 +30,38 @@ if not API_KEY:
 
 # Город по умолчанию
 DEFAULT_CITY = "Saint Petersburg"
+
+# Настройки вебхука
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-domain.com")  # Замените на ваш URL
+WEBHOOK_PATH = f"/webhook/{TELEGRAM_TOKEN}"
+PORT = int(os.getenv("PORT", 5000))
+
+# Создаем Flask приложение
+flask_app = Flask(__name__)
+
+
+@flask_app.route("/health", methods=["GET"])
+def health_check():
+    """Хелсчек эндпоинт для мониторинга"""
+    return jsonify(
+        {
+            "status": "healthy",
+            "service": "telegram-weather-bot",
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
+
+
+@flask_app.route("/", methods=["GET"])
+def index():
+    """Корневой эндпоинт"""
+    return jsonify(
+        {
+            "message": "Telegram Weather Bot is running",
+            "status": "active",
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
 
 
 def get_weather_data(city=DEFAULT_CITY):
@@ -129,6 +163,24 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"Ошибка при обработке update {update}: {context.error}")
 
 
+async def set_webhook(application: Application):
+    """Устанавливает вебхук для Telegram бота"""
+    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+
+    try:
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook установлен: {webhook_url}")
+    except Exception as e:
+        logger.error(f"Ошибка при установке webhook: {e}")
+        raise
+
+
+def run_flask():
+    """Запускает Flask приложение"""
+    logger.info(f"Запуск Flask сервера на порту {PORT}")
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+
+
 def main():
     """Основная функция запуска бота"""
     try:
@@ -143,9 +195,25 @@ def main():
         # Добавляем обработчик ошибок
         application.add_error_handler(error_handler)
 
-        # Запускаем бота
-        print("Бот погоды запущен...")
-        application.run_polling()
+        # Регистрируем вебхук обработчик в Flask
+        @flask_app.route(WEBHOOK_PATH, methods=["POST"])
+        def webhook():
+            """Обработчик вебхуков от Telegram"""
+            update = Update.de_json(request.get_json(), application.bot)
+            application.update_queue.put(update)
+            return "ok"
+
+        # Запускаем Flask в отдельном потоке
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+
+        # Устанавливаем вебхук
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            secret_token=WEBHOOK_PATH.split("/")[-1],
+            webhook_url=WEBHOOK_URL + WEBHOOK_PATH,
+        )
 
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
