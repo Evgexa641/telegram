@@ -179,25 +179,6 @@ async def on_shutdown(bot: Bot) -> None:
     logger.info("Webhook удален")
 
 
-async def aiohttp_app():
-    """Создание aiohttp приложения для вебхуков"""
-    app = web.Application()
-
-    # Регистрируем обработчик вебхуков
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-
-    # Настраиваем startup/shutdown обработчики
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    return app
-
-
 def run_flask():
     """Запускает Flask приложение"""
     logger.info(f"Запуск Flask сервера на порту {PORT}")
@@ -212,7 +193,18 @@ async def main():
         dp.shutdown.register(on_shutdown)
 
         # Создаем aiohttp приложение для вебхуков
-        app = await aiohttp_app()
+        app = web.Application()
+
+        # Регистрируем обработчик вебхуков
+        webhook_requests_handler = SimpleRequestHandler(
+            dispatcher=dp,
+            bot=bot,
+        )
+        webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
+        # Настраиваем startup/shutdown обработчики
+        app.on_startup.append(on_startup)
+        app.on_shutdown.append(on_shutdown)
 
         # Запускаем Flask в отдельном потоке
         import threading
