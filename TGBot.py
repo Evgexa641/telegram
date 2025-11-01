@@ -5,10 +5,9 @@ import os
 
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from dotenv import load_dotenv
-from flask import Flask, jsonify
 import requests
 
 
@@ -44,14 +43,10 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Создаем Flask приложение
-flask_app = Flask(__name__)
 
-
-@flask_app.route("/health", methods=["GET"])
-def health_check():
+async def health_check(request):
     """Хелсчек эндпоинт для мониторинга"""
-    return jsonify(
+    return web.json_response(
         {
             "status": "healthy",
             "service": "telegram-weather-bot",
@@ -60,10 +55,9 @@ def health_check():
     )
 
 
-@flask_app.route("/", methods=["GET"])
-def index():
+async def index(request):
     """Корневой эндпоинт"""
-    return jsonify(
+    return web.json_response(
         {
             "message": "Telegram Weather Bot is running",
             "status": "active",
@@ -179,12 +173,6 @@ async def on_shutdown(bot: Bot) -> None:
     logger.info("Webhook удален")
 
 
-def run_flask():
-    """Запускает Flask приложение"""
-    logger.info(f"Запуск Flask сервера на порту {PORT}")
-    flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
-
-
 async def main():
     """Основная функция запуска бота"""
     try:
@@ -192,8 +180,12 @@ async def main():
         dp.startup.register(on_startup)
         dp.shutdown.register(on_shutdown)
 
-        # Создаем aiohttp приложение для вебхуков
+        # Создаем aiohttp приложение
         app = web.Application()
+
+        # Добавляем дополнительные эндпоинты
+        app.router.add_get("/health", health_check)
+        app.router.add_get("/", index)
 
         # Регистрируем обработчик вебхуков
         webhook_requests_handler = SimpleRequestHandler(
@@ -202,26 +194,12 @@ async def main():
         )
         webhook_requests_handler.register(app, path=WEBHOOK_PATH)
 
-        # Настраиваем startup/shutdown обработчики
-        app.on_startup.append(on_startup)
-        app.on_shutdown.append(on_shutdown)
+        # Настраиваем application
+        setup_application(app, dp, bot=bot)
 
-        # Запускаем Flask в отдельном потоке
-        import threading
-
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-
-        # Запускаем aiohttp сервер
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", PORT)
-        await site.start()
-
+        # Запускаем сервер
         logger.info(f"Бот запущен на порту {PORT}")
-
-        # Бесконечный цикл
-        await asyncio.Future()
+        await web._run_app(app, host="0.0.0.0", port=PORT)
 
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
