@@ -1,13 +1,14 @@
+import asyncio
 from datetime import datetime
 import logging
 import os
-import threading
 
+from aiogram import Bot, Dispatcher, Router, types
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiohttp import web
 from dotenv import load_dotenv
 from flask import Flask, jsonify
 import requests
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 
 
 # Настройка логирования
@@ -32,9 +33,15 @@ if not API_KEY:
 DEFAULT_CITY = "Saint Petersburg"
 
 # Настройки вебхука
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-domain.com")  # Замените на ваш URL
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-domain.com")
 WEBHOOK_PATH = f"/webhook/{TELEGRAM_TOKEN}"
 PORT = int(os.getenv("PORT", 5000))
+
+# Инициализация бота и диспетчера
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
 # Создаем Flask приложение
 flask_app = Flask(__name__)
@@ -120,9 +127,10 @@ def format_weather_message(data):
         return "❌ Ошибка при обработке данных о погоде."
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.message(commands=["start"])
+async def start_command(message: types.Message) -> None:
     """Обработчик команды /start - показывает погоду в заданном городе"""
-    user = update.effective_user
+    user = message.from_user
 
     # Получаем данные о погоде
     weather_data = get_weather_data(DEFAULT_CITY)
@@ -133,12 +141,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Я бот, который показывает актуальную погоду.\n\n"
     )
 
-    await update.message.reply_text(
-        welcome_text + weather_message, parse_mode="Markdown"
-    )
+    await message.answer(welcome_text + weather_message, parse_mode="Markdown")
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.message(commands=["help"])
+async def help_command(message: types.Message) -> None:
     """Обработчик команды /help - показывает справку"""
     help_text = (
         "📖 **Справка по командам:**\n\n"
@@ -148,31 +155,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "ℹ️ Бот автоматически показывает актуальную погоду "
         "для заранее заданного города."
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    await message.answer(help_text, parse_mode="Markdown")
 
 
-async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.message(commands=["weather"])
+async def weather_command(message: types.Message) -> None:
     """Дополнительная команда для быстрого доступа к погоде"""
     weather_data = get_weather_data(DEFAULT_CITY)
     weather_message = format_weather_message(weather_data)
-    await update.message.reply_text(weather_message, parse_mode="Markdown")
+    await message.answer(weather_message, parse_mode="Markdown")
 
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик ошибок"""
-    logger.error(f"Ошибка при обработке update {update}: {context.error}")
+async def on_startup(bot: Bot) -> None:
+    """Действия при запуске бота"""
+    await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+    logger.info(f"Webhook установлен: {WEBHOOK_URL}{WEBHOOK_PATH}")
 
 
-async def set_webhook(application: Application):
-    """Устанавливает вебхук для Telegram бота"""
-    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+async def on_shutdown(bot: Bot) -> None:
+    """Действия при остановке бота"""
+    await bot.delete_webhook()
+    logger.info("Webhook удален")
 
-    try:
-        await application.bot.set_webhook(webhook_url)
-        logger.info(f"Webhook установлен: {webhook_url}")
-    except Exception as e:
-        logger.error(f"Ошибка при установке webhook: {e}")
-        raise
+
+async def aiohttp_app():
+    """Создание aiohttp приложения для вебхуков"""
+    app = web.Application()
+
+    # Регистрируем обработчик вебхуков
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=TELEGRAM_TOKEN,
+    )
+
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
+    # Настраиваем startup/shutdown обработчики
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    return app
 
 
 def run_flask():
@@ -181,43 +204,36 @@ def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 
-def main():
+async def main():
     """Основная функция запуска бота"""
     try:
-        # Создаем Application
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        # Настраиваем диспетчер
+        dp.startup.register(on_startup)
+        dp.shutdown.register(on_shutdown)
 
-        # Добавляем обработчики команд
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("weather", weather_command))
-
-        # Добавляем обработчик ошибок
-        application.add_error_handler(error_handler)
-
-        # Регистрируем вебхук обработчик в Flask
-        @flask_app.route(WEBHOOK_PATH, methods=["POST"])
-        def webhook():
-            """Обработчик вебхуков от Telegram"""
-            update = Update.de_json(request.get_json(), application.bot)
-            application.update_queue.put(update)
-            return "ok"
+        # Создаем aiohttp приложение для вебхуков
+        app = await aiohttp_app()
 
         # Запускаем Flask в отдельном потоке
+        import threading
+
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
 
-        # Устанавливаем вебхук
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            secret_token=WEBHOOK_PATH.split("/")[-1],
-            webhook_url=WEBHOOK_URL + WEBHOOK_PATH,
-        )
+        # Запускаем aiohttp сервер
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+
+        logger.info(f"Бот запущен на порту {PORT}")
+
+        # Бесконечный цикл
+        await asyncio.Future()
 
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
